@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Namma Space Viewer</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #111; overflow: hidden; font: 14px system-ui, sans-serif; color: #eee; }
+  canvas { display: block; }
+  #hud { position: fixed; left: 12px; bottom: 12px; background: #000a; padding: 8px 12px; border-radius: 6px; line-height: 1.5; pointer-events: none; }
+  #start { position: fixed; inset: 0; display: grid; place-items: center; background: #0008; cursor: pointer; font-size: 18px; }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.186.1/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.186.1/examples/jsm/",
+  "@sparkjsdev/spark": "https://cdn.jsdelivr.net/npm/@sparkjsdev/spark@2.3.1/dist/spark.module.js"
+} }
+</script>
+</head>
+<body>
+<div id="start">Click to walk &nbsp;·&nbsp; WASD move · mouse look · Q/E down/up · scroll = speed · Esc = release</div>
+<div id="hud">loading…</div>
+<script type="module">
+import * as THREE from "three";
+import { PointerLockControls } from "three/addons/controls/PointerLockControls.js";
+import { SplatMesh, SparkRenderer } from "@sparkjsdev/spark";
+
+const params = new URLSearchParams(location.search);
+const url = params.get("splat") || "../data/room1/splat/splat.ply";
+
+const renderer = new THREE.WebGLRenderer({ antialias: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.add(new SparkRenderer({ renderer }));
+const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.01, 1000);
+
+const splat = new SplatMesh({ url });
+splat.quaternion.set(1, 0, 0, 0); // COLMAP is y-down; flip to three.js y-up
+scene.add(splat);
+
+const hud = document.getElementById("hud");
+let speed = 1, cams = [], camIdx = 0;
+const toThree = v => new THREE.Vector3(...v).applyQuaternion(splat.quaternion);
+
+// Jump to a capture camera's pose: guaranteed to be inside the room, looking at something.
+function gotoCam(i) {
+  if (!cams.length) return;
+  camIdx = (i + cams.length) % cams.length;
+  const c = cams[camIdx];
+  camera.position.copy(toThree(c.center));
+  camera.up.copy(toThree(c.up));
+  camera.lookAt(camera.position.clone().add(toThree(c.forward)));
+  camera.up.set(0, 1, 0);
+  updateHud();
+}
+function updateHud() {
+  hud.textContent = `${splat.numSplats.toLocaleString()} splats · speed ${speed.toFixed(2)}` +
+    (cams.length ? ` · cam ${camIdx + 1}/${cams.length} ([ / ] to step)` : "");
+}
+
+Promise.all([
+  splat.initialized,
+  fetch(url.replace(/[^/]+$/, "cameras.json")).then(r => r.ok ? r.json() : []).catch(() => []),
+]).then(([, c]) => {
+  cams = Array.isArray(c) ? c : c.cams;
+  if (c.fy) {
+    // Match the phone's field of view: wider views show regions no frame ever covered.
+    // Portrait capture on a landscape screen -> fit the capture's width instead.
+    const vfov = 2 * Math.atan(c.height / 2 / c.fy);
+    const hfov = 2 * Math.atan(c.width / 2 / c.fy);
+    const fitW = 2 * Math.atan(Math.tan(hfov / 2) / camera.aspect);
+    camera.fov = THREE.MathUtils.radToDeg(Math.min(vfov, fitW));
+    camera.updateProjectionMatrix();
+  }
+  if (cams.length > 1) {
+    // walking speed ~ the capture walk sped up 2x (median step is robust to a stray pose)
+    const steps = cams.slice(1).map((c, i) => toThree(c.center).distanceTo(toThree(cams[i].center))).sort((a, b) => a - b);
+    speed = steps[steps.length >> 1] * 4 * 2;
+    gotoCam(0);
+  } else {
+    const box = splat.getBoundingBox();
+    camera.position.copy(box.getCenter(new THREE.Vector3()).applyQuaternion(splat.quaternion));
+    speed = box.getSize(new THREE.Vector3()).length() * 0.15;
+  }
+  updateHud();
+}).catch(e => hud.textContent = "failed to load " + url + ": " + e);
+
+const controls = new PointerLockControls(camera, document.body);
+const start = document.getElementById("start");
+start.onclick = () => controls.lock();
+controls.addEventListener("lock", () => start.style.display = "none");
+controls.addEventListener("unlock", () => start.style.display = "grid");
+
+const keys = {};
+addEventListener("keydown", e => {
+  keys[e.code] = true;
+  if (e.code === "BracketRight") gotoCam(camIdx + 1);
+  if (e.code === "BracketLeft") gotoCam(camIdx - 1);
+});
+addEventListener("keyup", e => keys[e.code] = false);
+addEventListener("wheel", e => {
+  speed *= e.deltaY < 0 ? 1.2 : 1 / 1.2;
+  updateHud();
+});
+addEventListener("resize", () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+const clock = new THREE.Clock();
+renderer.setAnimationLoop(() => {
+  const d = clock.getDelta() * speed;
+  if (keys.KeyW) controls.moveForward(d);
+  if (keys.KeyS) controls.moveForward(-d);
+  if (keys.KeyD) controls.moveRight(d);
+  if (keys.KeyA) controls.moveRight(-d);
+  if (keys.KeyE) camera.position.y += d;
+  if (keys.KeyQ) camera.position.y -= d;
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>

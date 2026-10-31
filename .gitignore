@@ -1,0 +1,6 @@
+.venv/
+tools/
+data/
+__pycache__/
+.venv-gs/
+target/
