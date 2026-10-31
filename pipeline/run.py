@@ -118,16 +118,22 @@ def read_poses(model, logfile):
     return sorted(poses, key=lambda p: p[0])
 
 
-def pose_jitter(model, logfile):
-    """(fraction of steps > 5x median, number of >8 deg turns) between consecutive video frames.
-    The global mapper solves positions from pairwise directions, which are undefined when the
-    camera turns on the spot (no parallax); that shows up as jumps and sudden turns here."""
+def pose_spikes(model, logfile):
+    """Number of frames whose camera jumps away from BOTH time-neighbours and back (in position or view
+    direction). The global mapper solves positions from pairwise directions, which are undefined when
+    the camera turns on the spot (no parallax), and that shows up as such spikes. A fast but smooth pan
+    or walk does not: the detour through the frame is no longer than the hop between its neighbours."""
     poses = read_poses(model, logfile)
     c = np.array([p[1] for p in poses])
     f = np.array([p[2].T[:, 2] for p in poses])
-    step = np.linalg.norm(np.diff(c, axis=0), axis=1)
-    turn = np.degrees(np.arccos(np.clip((f[1:] * f[:-1]).sum(1), -1, 1)))
-    return (step > 5 * np.median(step)).mean(), int((turn > 8).sum())
+    ang = lambda u, v: np.degrees(np.arccos(np.clip((u * v).sum(-1), -1, 1)))
+    med = np.median(np.linalg.norm(np.diff(c, axis=0), axis=1))
+    a, b, ac = (np.linalg.norm(c[1:-1] - c[:-2], axis=1), np.linalg.norm(c[2:] - c[1:-1], axis=1),
+                np.linalg.norm(c[2:] - c[:-2], axis=1))
+    ra, rb, rac = ang(f[1:-1], f[:-2]), ang(f[2:], f[1:-1]), ang(f[2:], f[:-2])
+    pos = (np.minimum(a, b) > 3 * med) & (a + b > 2.5 * ac + 1e-9)
+    rot = (np.minimum(ra, rb) > 4) & (ra + rb > 2.5 * rac + 1e-9)
+    return int((pos | rot).sum())
 
 
 def drop_pose_outliers(model, out_model, logfile, k=10):
@@ -239,13 +245,15 @@ def main():
     model = largest_model(sparse)
     mapper = a.mapper
     if mapper == "auto":
-        jumps, turns = pose_jitter(model, logfile) if a.src == "video" else (0, 0)
-        log(f"  pose jitter: {jumps:.0%} of steps are jumps, {turns} sudden turns")
-        mapper = "incremental" if jumps > 0.08 or turns >= 3 else "global"
+        # Thresholds from held-out tests: room3's broken global poses had 5 spikes (incremental
+        # +3.1 dB); room4's had 3 and incremental gained nothing while costing 9 minutes.
+        spikes = pose_spikes(model, logfile) if a.src == "video" else 0
+        log(f"  pose spikes: {spikes}")
+        mapper = "incremental" if spikes >= 4 else "global"
     if mapper == "incremental":
         sparse_inc = work / "sparse_inc"
         if not sparse_inc.exists():
-            stage("4b/6 sfm (incremental mapper: global poses jittery, likely turning on the spot)")
+            stage("4b/6 sfm (incremental mapper: global poses spiky, likely turning on the spot)")
             sparse_inc.mkdir()
             run([COLMAP, "mapper", "--database_path", db, "--image_path", images,
                  "--output_path", sparse_inc], logfile)

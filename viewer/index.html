@@ -19,7 +19,7 @@
 </script>
 </head>
 <body>
-<div id="start">Click to walk &nbsp;·&nbsp; WASD move · mouse look · Q/E down/up · scroll = speed · Esc = release</div>
+<div id="start">Click to walk &nbsp;·&nbsp; WASD move · mouse or drag / arrows to look · Q/E down/up · scroll = speed · [ ] capture cams</div>
 <div id="hud">loading…</div>
 <script type="module">
 import * as THREE from "three";
@@ -91,9 +91,30 @@ Promise.all([
 
 const controls = new PointerLockControls(camera, document.body);
 const start = document.getElementById("start");
-start.onclick = () => controls.lock();
-controls.addEventListener("lock", () => start.style.display = "none");
+start.onclick = () => {
+  start.style.display = "none";
+  // Pointer lock is refused in iframes/embedded panes; drag-to-look below still works there.
+  try { controls.lock(); } catch {}
+};
+document.addEventListener("pointerlockerror", () => {});
 controls.addEventListener("unlock", () => start.style.display = "grid");
+
+// Drag (mouse or touch) and arrow keys to look around when the pointer isn't locked.
+const euler = new THREE.Euler(0, 0, 0, "YXZ");
+function look(dx, dy) {
+  euler.setFromQuaternion(camera.quaternion);
+  euler.y -= dx;
+  euler.x = THREE.MathUtils.clamp(euler.x - dy, -1.5, 1.5);
+  camera.quaternion.setFromEuler(euler);
+}
+let drag = null;
+renderer.domElement.addEventListener("pointerdown", e => { if (!controls.isLocked) drag = [e.clientX, e.clientY]; });
+addEventListener("pointerup", () => drag = null);
+addEventListener("pointermove", e => {
+  if (!drag || controls.isLocked) return;
+  look((e.clientX - drag[0]) * 0.004, (e.clientY - drag[1]) * 0.004);
+  drag = [e.clientX, e.clientY];
+});
 
 const keys = {};
 addEventListener("keydown", e => {
@@ -114,13 +135,17 @@ addEventListener("resize", () => {
 
 const clock = new THREE.Clock();
 renderer.setAnimationLoop(() => {
-  const d = clock.getDelta() * speed;
+  const dt = clock.getDelta(), d = dt * speed, rot = dt * 1.5; // rot: 1.5 rad/s with arrows
   if (keys.KeyW) controls.moveForward(d);
   if (keys.KeyS) controls.moveForward(-d);
   if (keys.KeyD) controls.moveRight(d);
   if (keys.KeyA) controls.moveRight(-d);
   if (keys.KeyE) camera.position.y += d;
   if (keys.KeyQ) camera.position.y -= d;
+  if (keys.ArrowLeft) look(-rot, 0);
+  if (keys.ArrowRight) look(rot, 0);
+  if (keys.ArrowUp) look(0, -rot);
+  if (keys.ArrowDown) look(0, rot);
   renderer.render(scene, camera);
 });
 </script>
